@@ -32,28 +32,41 @@ F-1 Graduate · 3 locations by YYYY-MM-DD
 
 ### On-demand status check
 
-Alerts only fire when a date meets your cutoff. To ask "what's the earliest
-slot right now?" at any time, request a **status** — it reports the earliest
-date at *every* location you watch, ignoring the cutoff, and marks with ✓ any
-that already qualify. It's a single, non-urgent push and never touches the
-alert dedup state, so it can't suppress a real alert.
+Alerts only fire when a date meets your cutoff. To ask "what's the earliest slot
+right now?" at any time, request a **status** — it reports the earliest date at
+*every* location you watch, ignoring the cutoff, and marks with ✓ any that
+already qualify. It's a single, non-urgent push and never touches the alert
+dedup state, so it can't suppress a real alert.
 
-Three ways to trigger it:
+There are two **mutually exclusive** views, both honouring your per-city
+category rules (`VISA_DESC` + `VISA_DESC_BY_CITY`):
+
+| Command | Reports |
+|---------|---------|
+| `status` | **regular** slots only — what a normal applicant can book |
+| `emergency status` | **only** rows tagged `官方紧急申请 - 不是普通号` — the emergency pool |
+
+Keeping them separate matters: an emergency slot is often much earlier than any
+regular one, so mixing them would make a location look bookable when it isn't.
+
+Three ways to trigger:
 
 | From | How |
 |------|-----|
-| **Your phone** | Send `status` (or `emergency status`) as a message to your ntfy topic — the running watcher replies in ~1s |
+| **Your phone** | Send `status` or `emergency status` as a message to your ntfy topic — the running watcher replies in ~1s |
 | **GitHub** | Actions → *visaMonitor F-1* → **Run workflow** → mode `status` / `emergency-status` (works with your computer off) |
-| **Terminal** | `python monitor.py --check` (add `--emergency` to include emergency-only slots) |
-
-`emergency status` additionally counts rows tagged `官方紧急申请 - 不是普通号`,
-letting you peek at that pool without changing your configuration.
+| **Terminal** | `python monitor.py --check` (add `--emergency` for the emergency-only view) |
 
 ```
 F-1 status · none by 2026-12-31
 广州: 2026-09-15, 48 dates (All Others, All Students, Graduate / PhD students)
 武汉: 2026-10-09, 9 dates
 北京: 2026-10-20, 19 dates
+
+F-1 emergency status (官方紧急申请 only) · none by 2026-12-31
+武汉: 2026-08-26, 1 date
+广州: none
+北京: none
 ```
 
 > The phone trigger needs the **local watcher** running (only it holds an open

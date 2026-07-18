@@ -207,17 +207,26 @@ def _desc_filter(city: str) -> str:
     return DESC_BY_CITY.get(city, DESC_CONTAINS)
 
 
-def _row_wanted(row: dict, city: str = "", include_emergency: bool | None = None) -> bool:
-    """`include_emergency=None` uses the configured default; pass True/False to
-    override for a single request (e.g. an on-demand "emergency status")."""
+# How to treat rows tagged 官方紧急申请 - 不是普通号 ("emergency-only" slots):
+EMG_EXCLUDE = "exclude"   # regular slots only  -> the "status" view and normal alerts
+EMG_ONLY = "only"         # emergency slots only -> the "emergency status" view
+EMG_INCLUDE = "include"   # both
+
+
+def _row_wanted(row: dict, city: str = "", emergency: str | None = None) -> bool:
+    """`emergency=None` uses the configured default (VISA_INCLUDE_EMERGENCY);
+    pass EMG_EXCLUDE / EMG_ONLY / EMG_INCLUDE to override for one request."""
     if not row["badge"].startswith(VISA_PREFIX):
         return False
     desc = _desc_filter(city) if city else DESC_CONTAINS
     if desc and desc.lower() not in row["desc"].lower():
         return False
-    allow_emergency = INCLUDE_EMERGENCY if include_emergency is None else include_emergency
-    if row.get("emergency") and not allow_emergency:
-        return False  # 官方紧急申请 - 不是普通号: emergency-only, not bookable by regular applicants
+    mode = emergency or (EMG_INCLUDE if INCLUDE_EMERGENCY else EMG_EXCLUDE)
+    is_emergency = bool(row.get("emergency"))
+    if mode == EMG_EXCLUDE and is_emergency:
+        return False   # emergency-only slot, not bookable by regular applicants
+    if mode == EMG_ONLY and not is_emergency:
+        return False   # regular slot, excluded from the emergency-only view
     return True
 
 
@@ -390,24 +399,24 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
     save_state(state)
 
 
-def parse_command(text: str) -> bool | None:
+def parse_command(text: str) -> str | None:
     """Map an inbound ntfy message to a status request.
 
-    Returns True  -> status INCLUDING emergency-only slots
-            False -> normal status
-            None  -> not a command (ignore)
+    "status"           -> EMG_EXCLUDE: regular slots only
+    "emergency status" -> EMG_ONLY:    官方紧急申请 - 不是普通号 slots only
+    anything else      -> None (ignore)
     """
     t = " ".join((text or "").strip().lower().split())
     if t in ("status", "check", "s"):
-        return False
+        return EMG_EXCLUDE
     if t in ("emergency status", "status emergency", "emergency", "es"):
-        return True
+        return EMG_ONLY
     return None
 
 
 # Commands arrive on a background thread but must be executed on the main thread:
 # Playwright's sync API is not thread-safe, so the listener only enqueues.
-COMMANDS: "queue.Queue[bool]" = queue.Queue()
+COMMANDS: "queue.Queue[str]" = queue.Queue()
 
 
 def listen_for_commands() -> None:
@@ -432,23 +441,24 @@ def listen_for_commands() -> None:
                         continue
                     if msg.get("event") != "message" or msg.get("title"):
                         continue  # keepalive/open event, or one of our own pushes
-                    want_emg = parse_command(msg.get("message", ""))
-                    if want_emg is None:
+                    mode = parse_command(msg.get("message", ""))
+                    if mode is None:
                         continue
                     stamp = dt.datetime.now().isoformat(timespec="seconds")
-                    print(f"[{stamp}] COMMAND: {msg.get('message', '').strip()!r}", flush=True)
-                    COMMANDS.put(want_emg)
+                    print(f"[{stamp}] COMMAND: {msg.get('message', '').strip()!r} -> {mode}", flush=True)
+                    COMMANDS.put(mode)
         except Exception:
             pass  # network blip / stream closed -- reconnect after a pause
         time.sleep(5)
 
 
-def build_status(data: dict, include_emergency: bool | None = None) -> tuple[str, str]:
+def build_status(data: dict, emergency: str = EMG_EXCLUDE) -> tuple[str, str]:
     """On-demand status: the earliest slot at EACH watched location.
 
     Unlike the alert path this ignores the cutoff (so it still tells you
     something when nothing qualifies); dates at/below the cutoff are marked ✓.
-    `include_emergency=True` also counts 官方紧急申请 emergency-only rows.
+    `emergency=EMG_ONLY` reports ONLY 官方紧急申请 - 不是普通号 rows; the default
+    reports only regular ones. The per-city category rules apply either way.
     """
     cutoff = dt.date.fromisoformat(CUTOFF)
     idx = _cities_index(data)
@@ -460,7 +470,7 @@ def build_status(data: dict, include_emergency: bool | None = None) -> tuple[str
             continue
         dates, descs = set(), set()
         for row in c["rows"]:
-            if not _row_wanted(row, city, include_emergency):
+            if not _row_wanted(row, city, emergency):
                 continue
             for chip in row["dates"]:
                 try:
@@ -470,7 +480,7 @@ def build_status(data: dict, include_emergency: bool | None = None) -> tuple[str
             if row["dates"]:
                 descs.add(row["desc"])
         if not dates:
-            lines.append((None, f"{city}: no slots"))
+            lines.append((None, f"{city}: none"))
             continue
         earliest = min(dates)
         cats = ""
@@ -482,13 +492,14 @@ def build_status(data: dict, include_emergency: bool | None = None) -> tuple[str
     # soonest first; locations with nothing sink to the bottom
     lines.sort(key=lambda t: (t[0] is None, t[0] or dt.date.max))
     hits = sum(1 for d, _ in lines if d and d <= cutoff)
-    emg = " (incl. emergency)" if include_emergency else ""
-    title = (f"{VISA_PREFIX} status{emg} · {hits} at/before {CUTOFF}" if hits
-             else f"{VISA_PREFIX} status{emg} · none by {CUTOFF}")
+    kind = {EMG_ONLY: "emergency status (官方紧急申请 only)",
+            EMG_INCLUDE: "status (regular + emergency)"}.get(emergency, "status")
+    title = (f"{VISA_PREFIX} {kind} · {hits} at/before {CUTOFF}" if hits
+             else f"{VISA_PREFIX} {kind} · none by {CUTOFF}")
     return title, "\n".join(text for _, text in lines)
 
 
-def run_check(include_emergency: bool | None = None, page=None) -> int:
+def run_check(emergency: str = EMG_EXCLUDE, page=None) -> int:
     """On-demand: push a snapshot of the earliest slot per location.
 
     `page` lets the watch loop reuse its open browser instead of launching a
@@ -508,7 +519,7 @@ def run_check(include_emergency: bool | None = None, page=None) -> int:
         push(f"{VISA_PREFIX} status unavailable", f"Extract failed: {data['error']}",
              priority="default")
         return 0
-    title, body = build_status(data, include_emergency)
+    title, body = build_status(data, emergency)
     print(f"[{stamp}] {title}\n" + "\n".join("    " + b for b in body.split("\n")), flush=True)
     # single, non-urgent push: this is user-requested, not a slot alert. Does not
     # touch dedup state, so it can never suppress a real alert.
@@ -570,11 +581,11 @@ def run_watch(interval: int, recycle: int = 40) -> int:
                 deadline = time.monotonic() + interval + random.uniform(0, min(15, interval * 0.25))
                 while time.monotonic() < deadline:
                     try:
-                        want_emg = COMMANDS.get(timeout=1.0)
+                        mode = COMMANDS.get(timeout=1.0)
                     except queue.Empty:
                         continue
                     try:
-                        run_check(include_emergency=want_emg, page=page)
+                        run_check(emergency=mode, page=page)
                     except Exception as e:
                         print(f"[command] failed: {e}", flush=True)
         except KeyboardInterrupt:
@@ -594,7 +605,8 @@ def main() -> None:
                     help="on-demand: push the earliest slot at each watched location "
                          "(ignores the cutoff) and exit")
     ap.add_argument("--emergency", action="store_true",
-                    help="with --check: also count 官方紧急申请 emergency-only slots")
+                    help="with --check: report ONLY 官方紧急申请 - 不是普通号 slots "
+                         "(default reports only regular ones)")
     ap.add_argument("--test-push", action="store_true", help="send a test push and exit")
     args = ap.parse_args()
 
@@ -605,7 +617,7 @@ def main() -> None:
         return
 
     if args.check:
-        sys.exit(run_check(include_emergency=True if args.emergency else None))
+        sys.exit(run_check(emergency=EMG_ONLY if args.emergency else EMG_EXCLUDE))
 
     if args.watch is not None:
         sys.exit(run_watch(max(20, args.watch)))
