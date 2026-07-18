@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TEMPLATE -- do not install this file directly.
+
+  Placeholders below must be substituted with your own values. The README's
+  "Run the watcher 24/7 on your Mac" section has a one-liner that fills them in
+  and installs the result to ~/Library/LaunchAgents/ (which is NOT in this repo,
+  so your real paths and push topic never get committed).
+
+    __PYTHON__  absolute path to a python that has playwright installed
+    __PROJECT__ absolute path to your clone of this repo
+    __TOPIC__   your private ntfy topic
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.visamonitor.f1</string>
+
+  <!-- caffeinate -i keeps the Mac from idle-sleeping while the watcher runs -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>__PYTHON__</string>
+    <string>__PROJECT__/monitor.py</string>
+    <string>--watch</string>
+    <string>60</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__</string>
+
+  <!--
+    Search criteria below are EXAMPLES. Replace them with your own after
+    installing to ~/Library/LaunchAgents/ (that copy is outside the repo, so your
+    real values are never committed). See "Configuration" in the README.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VISA_NTFY_TOPIC</key><string>__TOPIC__</string>
+    <!-- comma-separated consulate cities, Chinese names as shown on the site -->
+    <key>VISA_CITIES</key><string>广州,北京</string>
+    <!-- visa badge prefix, e.g. F-1 / B1B2 / H-1B -->
+    <key>VISA_TYPE</key><string>F-1</string>
+    <!-- narrow to a sub-category by description substring; empty = all -->
+    <key>VISA_DESC</key><string></string>
+    <!-- per-city override, "城市=值" pairs; ALL = every sub-category there -->
+    <key>VISA_DESC_BY_CITY</key><string></string>
+    <!-- alert on dates ON OR BEFORE this date, inclusive (ISO yyyy-mm-dd) -->
+    <key>VISA_CUTOFF</key><string>2026-12-31</string>
+    <!-- emergency-only slots (官方紧急申请 - 不是普通号): 0 = ignore (default), 1 = include -->
+    <key>VISA_INCLUDE_EMERGENCY</key><string>0</string>
+    <!-- repeat each new alert this many times, this many seconds apart -->
+    <key>VISA_PUSH_REPEAT</key><string>6</string>
+    <key>VISA_PUSH_INTERVAL</key><string>5</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+    <key>PYTHONUTF8</key><string>1</string>
+  </dict>
+
+  <!-- Start at login, and restart if it ever exits/crashes -->
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/watch.err.log</string>
+</dict>
+</plist>

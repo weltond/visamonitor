@@ -1,0 +1,71 @@
+name: visaMonitor F-1
+
+# Every 5 minutes. NOTE: GitHub may delay scheduled runs under load, so real
+# cadence can drift to 5-15 min. Keep this repo PUBLIC so Actions minutes stay
+# free (a 5-min cron would blow the 2,000-min/month private-repo budget).
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # lets you run it on demand from the Actions tab
+
+concurrency:
+  group: visamonitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Official Playwright image, pinned to the same version as requirements.txt.
+    # It ships the BROWSERS pre-installed at /ms-playwright, but not the
+    # playwright *Python package* on /usr/bin/python -- so we pip install that
+    # below (fast, a few seconds; no browser download needed).
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.61.0-noble
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Playwright Python package
+        run: |
+          python -m pip --version >/dev/null 2>&1 || python -m ensurepip --upgrade
+          python -m pip install --no-cache-dir --break-system-packages -r requirements.txt \
+            || python -m pip install --no-cache-dir -r requirements.txt
+          python -c "import playwright; print('playwright import OK')"
+
+      # Restore the "what have I already alerted" state from the last run so we
+      # don't push the same date twice. Rolling key: newest cache wins.
+      - name: Restore monitor state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: visamonitor-state-${{ github.run_id }}
+          restore-keys: |
+            visamonitor-state-
+
+      - name: Check availability
+        # Search criteria come from repo Variables (Settings > Secrets and
+        # variables > Actions > Variables) so this public workflow file does not
+        # disclose what you are personally watching. The push topic is a Secret.
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: /ms-playwright   # use the image's pre-installed browsers
+          VISA_NTFY_TOPIC: ${{ secrets.VISA_NTFY_TOPIC }}
+          VISA_CITIES: ${{ vars.VISA_CITIES }}
+          VISA_TYPE: ${{ vars.VISA_TYPE }}
+          VISA_DESC: ${{ vars.VISA_DESC }}
+          VISA_DESC_BY_CITY: ${{ vars.VISA_DESC_BY_CITY }}
+          VISA_CUTOFF: ${{ vars.VISA_CUTOFF }}
+          VISA_INCLUDE_EMERGENCY: ${{ vars.VISA_INCLUDE_EMERGENCY }}
+          VISA_PUSH_REPEAT: ${{ vars.VISA_PUSH_REPEAT }}
+          VISA_PUSH_INTERVAL: ${{ vars.VISA_PUSH_INTERVAL }}
+          PYTHONUTF8: "1"
+        run: python monitor.py --once
+
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: visamonitor-state-${{ github.run_id }}
