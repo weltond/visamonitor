@@ -19,10 +19,12 @@ import argparse
 import datetime as dt
 import json
 import os
+import queue
 import random
 import re
 import signal
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -205,13 +207,16 @@ def _desc_filter(city: str) -> str:
     return DESC_BY_CITY.get(city, DESC_CONTAINS)
 
 
-def _row_wanted(row: dict, city: str = "") -> bool:
+def _row_wanted(row: dict, city: str = "", include_emergency: bool | None = None) -> bool:
+    """`include_emergency=None` uses the configured default; pass True/False to
+    override for a single request (e.g. an on-demand "emergency status")."""
     if not row["badge"].startswith(VISA_PREFIX):
         return False
     desc = _desc_filter(city) if city else DESC_CONTAINS
     if desc and desc.lower() not in row["desc"].lower():
         return False
-    if row.get("emergency") and not INCLUDE_EMERGENCY:
+    allow_emergency = INCLUDE_EMERGENCY if include_emergency is None else include_emergency
+    if row.get("emergency") and not allow_emergency:
         return False  # 官方紧急申请 - 不是普通号: emergency-only, not bookable by regular applicants
     return True
 
@@ -385,6 +390,132 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
     save_state(state)
 
 
+def parse_command(text: str) -> bool | None:
+    """Map an inbound ntfy message to a status request.
+
+    Returns True  -> status INCLUDING emergency-only slots
+            False -> normal status
+            None  -> not a command (ignore)
+    """
+    t = " ".join((text or "").strip().lower().split())
+    if t in ("status", "check", "s"):
+        return False
+    if t in ("emergency status", "status emergency", "emergency", "es"):
+        return True
+    return None
+
+
+# Commands arrive on a background thread but must be executed on the main thread:
+# Playwright's sync API is not thread-safe, so the listener only enqueues.
+COMMANDS: "queue.Queue[bool]" = queue.Queue()
+
+
+def listen_for_commands() -> None:
+    """Background thread: watch our own ntfy topic and enqueue status commands.
+
+    ntfy streams the topic as newline-delimited JSON. We only react to plain
+    messages with NO title -- every push we send has a title, so the bot can
+    never answer itself and loop.
+    """
+    if not NTFY_TOPIC:
+        return
+    # No `since=` -- that default means "stream messages from now on". (Passing
+    # since=now is rejected with HTTP 400; valid values are a duration/id/all.)
+    url = f"{NTFY_SERVER}/{urllib.parse.quote(NTFY_TOPIC)}/json"
+    while True:
+        try:
+            with urllib.request.urlopen(url) as stream:
+                for raw in stream:
+                    try:
+                        msg = json.loads(raw.decode("utf-8", "replace"))
+                    except ValueError:
+                        continue
+                    if msg.get("event") != "message" or msg.get("title"):
+                        continue  # keepalive/open event, or one of our own pushes
+                    want_emg = parse_command(msg.get("message", ""))
+                    if want_emg is None:
+                        continue
+                    stamp = dt.datetime.now().isoformat(timespec="seconds")
+                    print(f"[{stamp}] COMMAND: {msg.get('message', '').strip()!r}", flush=True)
+                    COMMANDS.put(want_emg)
+        except Exception:
+            pass  # network blip / stream closed -- reconnect after a pause
+        time.sleep(5)
+
+
+def build_status(data: dict, include_emergency: bool | None = None) -> tuple[str, str]:
+    """On-demand status: the earliest slot at EACH watched location.
+
+    Unlike the alert path this ignores the cutoff (so it still tells you
+    something when nothing qualifies); dates at/below the cutoff are marked ✓.
+    `include_emergency=True` also counts 官方紧急申请 emergency-only rows.
+    """
+    cutoff = dt.date.fromisoformat(CUTOFF)
+    idx = _cities_index(data)
+    lines: list[tuple[dt.date | None, str]] = []
+    for city in CITIES:
+        c = idx.get(city)
+        if not c:
+            lines.append((None, f"{city}: not found"))
+            continue
+        dates, descs = set(), set()
+        for row in c["rows"]:
+            if not _row_wanted(row, city, include_emergency):
+                continue
+            for chip in row["dates"]:
+                try:
+                    dates.add(parse_cn_date(chip, TODAY))
+                except ValueError:
+                    continue
+            if row["dates"]:
+                descs.add(row["desc"])
+        if not dates:
+            lines.append((None, f"{city}: no slots"))
+            continue
+        earliest = min(dates)
+        cats = ""
+        if city in DESC_BY_CITY:  # broadened city -> say which sub-category
+            cats = " (" + ", ".join(sorted(_short_desc(d) for d in descs)) + ")"
+        mark = " ✓" if earliest <= cutoff else ""
+        plural = "" if len(dates) == 1 else "s"
+        lines.append((earliest, f"{city}: {earliest.isoformat()}, {len(dates)} date{plural}{cats}{mark}"))
+    # soonest first; locations with nothing sink to the bottom
+    lines.sort(key=lambda t: (t[0] is None, t[0] or dt.date.max))
+    hits = sum(1 for d, _ in lines if d and d <= cutoff)
+    emg = " (incl. emergency)" if include_emergency else ""
+    title = (f"{VISA_PREFIX} status{emg} · {hits} at/before {CUTOFF}" if hits
+             else f"{VISA_PREFIX} status{emg} · none by {CUTOFF}")
+    return title, "\n".join(text for _, text in lines)
+
+
+def run_check(include_emergency: bool | None = None, page=None) -> int:
+    """On-demand: push a snapshot of the earliest slot per location.
+
+    `page` lets the watch loop reuse its open browser instead of launching a
+    second Chromium just to answer a command.
+    """
+    stamp = dt.datetime.now().isoformat(timespec="seconds")
+    try:
+        data = render_and_extract(page, TODAY) if page is not None else scrape(TODAY)
+    except Exception as e:
+        reason = str(e) or e.__class__.__name__
+        print(f"[{stamp}] STATUS: SCRAPE_FAILED ({reason})", flush=True)
+        push(f"{VISA_PREFIX} status unavailable", f"Could not read qmq.app: {reason}",
+             priority="default")
+        return 0
+    if data.get("error"):
+        print(f"[{stamp}] STATUS: EXTRACT_FAILED ({data['error']})", flush=True)
+        push(f"{VISA_PREFIX} status unavailable", f"Extract failed: {data['error']}",
+             priority="default")
+        return 0
+    title, body = build_status(data, include_emergency)
+    print(f"[{stamp}] {title}\n" + "\n".join("    " + b for b in body.split("\n")), flush=True)
+    # single, non-urgent push: this is user-requested, not a slot alert. Does not
+    # touch dedup state, so it can never suppress a real alert.
+    push(title, body, priority="default")
+    return 0
+
+
 def run_once() -> int:
     try:
         data = scrape(TODAY)
@@ -410,6 +541,8 @@ def run_watch(interval: int, recycle: int = 40) -> int:
     # Treat SIGTERM (how launchd/systemd stop us) like Ctrl-C so `finally`
     # runs and Chromium is closed cleanly instead of orphaned.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    # Answer "status" / "emergency status" messages sent to our ntfy topic.
+    threading.Thread(target=listen_for_commands, daemon=True).start()
     print(f"[watch] every ~{interval}s: {'/'.join(CITIES)} {target_label()} by {CUTOFF}. "
           f"Ctrl-C to stop.", flush=True)
     with sync_playwright() as p:
@@ -432,7 +565,18 @@ def run_watch(interval: int, recycle: int = 40) -> int:
                     except Exception:
                         pass
                     page = _new_page(browser)
-                time.sleep(interval + random.uniform(0, min(15, interval * 0.25)))
+                # Idle until the next cycle, but stay responsive to commands:
+                # poll the queue every second and answer on THIS thread.
+                deadline = time.monotonic() + interval + random.uniform(0, min(15, interval * 0.25))
+                while time.monotonic() < deadline:
+                    try:
+                        want_emg = COMMANDS.get(timeout=1.0)
+                    except queue.Empty:
+                        continue
+                    try:
+                        run_check(include_emergency=want_emg, page=page)
+                    except Exception as e:
+                        print(f"[command] failed: {e}", flush=True)
         except KeyboardInterrupt:
             print("\n[watch] stopped.", flush=True)
         finally:
@@ -446,6 +590,11 @@ def main() -> None:
     ap.add_argument("--watch", nargs="?", type=int, const=60, metavar="SECONDS",
                     help="stay running, re-check every SECONDS (default 60, min 20); "
                          "near real-time, needs an always-on machine")
+    ap.add_argument("--check", action="store_true",
+                    help="on-demand: push the earliest slot at each watched location "
+                         "(ignores the cutoff) and exit")
+    ap.add_argument("--emergency", action="store_true",
+                    help="with --check: also count 官方紧急申请 emergency-only slots")
     ap.add_argument("--test-push", action="store_true", help="send a test push and exit")
     args = ap.parse_args()
 
@@ -454,6 +603,9 @@ def main() -> None:
              f"Monitoring {VISA_PREFIX} [{DESC_CONTAINS}] in {'/'.join(CITIES)} for dates by {CUTOFF}.")
         print("test push sent (if VISA_NTFY_TOPIC set)")
         return
+
+    if args.check:
+        sys.exit(run_check(include_emergency=True if args.emergency else None))
 
     if args.watch is not None:
         sys.exit(run_watch(max(20, args.watch)))

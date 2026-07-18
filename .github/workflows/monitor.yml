@@ -6,7 +6,15 @@ name: visaMonitor F-1
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # lets you run it on demand from the Actions tab
+  # Run on demand from the Actions tab (or the GitHub mobile app) -- handy when
+  # your local watcher isn't running, since only it can answer ntfy commands.
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "monitor = alert only if a date qualifies; status = push earliest slot per location"
+        type: choice
+        default: monitor
+        options: [monitor, status, emergency-status]
 
 concurrency:
   group: visamonitor
@@ -61,7 +69,13 @@ jobs:
           VISA_PUSH_REPEAT: ${{ vars.VISA_PUSH_REPEAT }}
           VISA_PUSH_INTERVAL: ${{ vars.VISA_PUSH_INTERVAL }}
           PYTHONUTF8: "1"
-        run: python monitor.py --once
+        # Scheduled runs have no inputs, so mode is empty -> "monitor".
+        run: |
+          case "${{ inputs.mode }}" in
+            status)           python monitor.py --check ;;
+            emergency-status) python monitor.py --check --emergency ;;
+            *)                python monitor.py --once ;;
+          esac
 
       - name: Save monitor state
         if: always()

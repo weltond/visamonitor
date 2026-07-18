@@ -30,6 +30,35 @@ F-1 Graduate · 3 locations by YYYY-MM-DD
 
 (Tapping the notification opens qmq.app.)
 
+### On-demand status check
+
+Alerts only fire when a date meets your cutoff. To ask "what's the earliest
+slot right now?" at any time, request a **status** — it reports the earliest
+date at *every* location you watch, ignoring the cutoff, and marks with ✓ any
+that already qualify. It's a single, non-urgent push and never touches the
+alert dedup state, so it can't suppress a real alert.
+
+Three ways to trigger it:
+
+| From | How |
+|------|-----|
+| **Your phone** | Send `status` (or `emergency status`) as a message to your ntfy topic — the running watcher replies in ~1s |
+| **GitHub** | Actions → *visaMonitor F-1* → **Run workflow** → mode `status` / `emergency-status` (works with your computer off) |
+| **Terminal** | `python monitor.py --check` (add `--emergency` to include emergency-only slots) |
+
+`emergency status` additionally counts rows tagged `官方紧急申请 - 不是普通号`,
+letting you peek at that pool without changing your configuration.
+
+```
+F-1 status · none by 2026-12-31
+广州: 2026-09-15, 48 dates (All Others, All Students, Graduate / PhD students)
+武汉: 2026-10-09, 9 dates
+北京: 2026-10-20, 19 dates
+```
+
+> The phone trigger needs the **local watcher** running (only it holds an open
+> connection to the topic). If your machine is off, use the GitHub trigger.
+
 ---
 
 ## Setup (about 5 minutes)
