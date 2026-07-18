@@ -41,13 +41,20 @@ dedup state, so it can't suppress a real alert.
 There are two **mutually exclusive** views, both honouring your per-city
 category rules (`VISA_DESC` + `VISA_DESC_BY_CITY`):
 
-| Command | Reports |
-|---------|---------|
-| `status` | **regular** slots only — what a normal applicant can book |
-| `emergency status` | **only** rows tagged `官方紧急申请 - 不是普通号` — the emergency pool |
+| Command | Reports | Filtering |
+|---------|---------|-----------|
+| `status` | **regular** slots only — what a normal applicant can book | `VISA_TYPE` + your per-city sub-category rules |
+| `emergency status` | **only** rows tagged `官方紧急申请 - 不是普通号` | `VISA_EMERGENCY_TYPES`, **all** sub-categories, every city |
 
 Keeping them separate matters: an emergency slot is often much earlier than any
 regular one, so mixing them would make a location look bookable when it isn't.
+
+The emergency view filters differently **on purpose**, because that pool is
+allocated differently: the visa types in `VISA_EMERGENCY_TYPES` (default
+`F-1,J-1`) draw on **one shared pool**, and its F-1 sub-categories aren't
+distinguished. Applying the regular narrowing there would hide slots that are
+genuinely available — so the emergency view ignores `VISA_DESC` /
+`VISA_DESC_BY_CITY` and reports which visa type each location's slots came from.
 
 Three ways to trigger:
 
@@ -155,7 +162,8 @@ gh variable set VISA_CITIES --body "广州,北京"      # etc., one per setting
 | `VISA_DESC` | Default: narrow to one sub-category by description text (case-insensitive substring); empty = all | `Graduate` (Graduate/PhD), `All Students`, `All Others` |
 | `VISA_DESC_BY_CITY` | **Per-city override** of `VISA_DESC`, as `城市=值` pairs. `ALL` = watch every sub-category in that city. | `上海=ALL` |
 | `VISA_CUTOFF` | Alert on dates **on or before** this, inclusive (ISO) | `2026-12-31` |
-| `VISA_INCLUDE_EMERGENCY` | Include "官方紧急申请 - 不是普通号" emergency-only slots (bookable only by users in the emergency pool). `0` = ignore (default), `1` = include | `0` |
+| `VISA_INCLUDE_EMERGENCY` | Let **alerts** include "官方紧急申请 - 不是普通号" emergency-only slots. `0` = ignore (default), `1` = include. (Does not affect the `emergency status` view.) | `0` |
+| `VISA_EMERGENCY_TYPES` | Visa badges sharing one emergency slot pool; used only by `emergency status` | `F-1,J-1` |
 | `VISA_PUSH_REPEAT` | Repeat each new alert this many times (numbered `i/N`) so you don't miss it | `6` |
 | `VISA_PUSH_INTERVAL` | Seconds between those repeats | `5` |
 

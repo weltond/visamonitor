@@ -70,6 +70,10 @@ CUTOFF = _env("CUTOFF") or (dt.date.today() + dt.timedelta(days=60)).isoformat()
 # "官方紧急申请 - 不是普通号" rows are emergency-only slots (not bookable by regular
 # applicants). Excluded by default; set VISA_INCLUDE_EMERGENCY=1 to include them.
 INCLUDE_EMERGENCY = _env("INCLUDE_EMERGENCY").strip().lower() in ("1", "true", "yes", "on")
+# Visa badges that share the SAME emergency (官方紧急申请) slot pool. At these
+# consulates F-1 and J-1 draw on one pool, so the emergency view must look at
+# both or it will under-report. Used only by the "emergency status" view.
+EMERGENCY_TYPES = [t.strip() for t in _env("EMERGENCY_TYPES", "F-1,J-1").split(",") if t.strip()]
 # When a NEW matching date appears, repeat the push this many times, this many
 # seconds apart, so you don't overlook it.
 PUSH_REPEAT = max(1, int(_env("PUSH_REPEAT", "6") or 6))
@@ -215,18 +219,28 @@ EMG_INCLUDE = "include"   # both
 
 def _row_wanted(row: dict, city: str = "", emergency: str | None = None) -> bool:
     """`emergency=None` uses the configured default (VISA_INCLUDE_EMERGENCY);
-    pass EMG_EXCLUDE / EMG_ONLY / EMG_INCLUDE to override for one request."""
+    pass EMG_EXCLUDE / EMG_ONLY / EMG_INCLUDE to override for one request.
+
+    The emergency pool is allocated differently from regular slots, so the
+    EMG_ONLY view deliberately filters differently -- see EMERGENCY_TYPES.
+    """
+    mode = emergency or (EMG_INCLUDE if INCLUDE_EMERGENCY else EMG_EXCLUDE)
+    is_emergency = bool(row.get("emergency"))
+
+    if mode == EMG_ONLY:
+        # Emergency slots are pooled: F-1 and J-1 draw on the SAME slots, and the
+        # F-1 sub-categories are not distinguished either. So widen to
+        # EMERGENCY_TYPES and ignore the per-city description narrowing entirely
+        # -- otherwise we would hide slots that are in fact available.
+        return is_emergency and any(row["badge"].startswith(t) for t in EMERGENCY_TYPES)
+
     if not row["badge"].startswith(VISA_PREFIX):
         return False
     desc = _desc_filter(city) if city else DESC_CONTAINS
     if desc and desc.lower() not in row["desc"].lower():
         return False
-    mode = emergency or (EMG_INCLUDE if INCLUDE_EMERGENCY else EMG_EXCLUDE)
-    is_emergency = bool(row.get("emergency"))
     if mode == EMG_EXCLUDE and is_emergency:
         return False   # emergency-only slot, not bookable by regular applicants
-    if mode == EMG_ONLY and not is_emergency:
-        return False   # regular slot, excluded from the emergency-only view
     return True
 
 
@@ -468,7 +482,7 @@ def build_status(data: dict, emergency: str = EMG_EXCLUDE) -> tuple[str, str]:
         if not c:
             lines.append((None, f"{city}: not found"))
             continue
-        dates, descs = set(), set()
+        dates, labels = set(), set()
         for row in c["rows"]:
             if not _row_wanted(row, city, emergency):
                 continue
@@ -478,24 +492,32 @@ def build_status(data: dict, emergency: str = EMG_EXCLUDE) -> tuple[str, str]:
                 except ValueError:
                     continue
             if row["dates"]:
-                descs.add(row["desc"])
+                # Emergency view spans visa types (F-1/J-1), so name the badge;
+                # otherwise name the sub-category, but only where a city is
+                # broadened (elsewhere it's always the same one).
+                labels.add(row["badge"] if emergency == EMG_ONLY
+                           else _short_desc(row["desc"]) if city in DESC_BY_CITY else "")
         if not dates:
             lines.append((None, f"{city}: none"))
             continue
         earliest = min(dates)
-        cats = ""
-        if city in DESC_BY_CITY:  # broadened city -> say which sub-category
-            cats = " (" + ", ".join(sorted(_short_desc(d) for d in descs)) + ")"
+        named = sorted(x for x in labels if x)
+        cats = f" ({', '.join(named)})" if named else ""
         mark = " ✓" if earliest <= cutoff else ""
         plural = "" if len(dates) == 1 else "s"
         lines.append((earliest, f"{city}: {earliest.isoformat()}, {len(dates)} date{plural}{cats}{mark}"))
     # soonest first; locations with nothing sink to the bottom
     lines.sort(key=lambda t: (t[0] is None, t[0] or dt.date.max))
     hits = sum(1 for d, _ in lines if d and d <= cutoff)
-    kind = {EMG_ONLY: "emergency status (官方紧急申请 only)",
-            EMG_INCLUDE: "status (regular + emergency)"}.get(emergency, "status")
-    title = (f"{VISA_PREFIX} {kind} · {hits} at/before {CUTOFF}" if hits
-             else f"{VISA_PREFIX} {kind} · none by {CUTOFF}")
+    # The emergency view spans the pooled visa types, so name them, not VISA_TYPE.
+    if emergency == EMG_ONLY:
+        what = f"{'/'.join(EMERGENCY_TYPES)} emergency status (官方紧急申请 only)"
+    elif emergency == EMG_INCLUDE:
+        what = f"{VISA_PREFIX} status (regular + emergency)"
+    else:
+        what = f"{VISA_PREFIX} status"
+    title = (f"{what} · {hits} at/before {CUTOFF}" if hits
+             else f"{what} · none by {CUTOFF}")
     return title, "\n".join(text for _, text in lines)
 
 

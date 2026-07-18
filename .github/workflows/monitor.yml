@@ -66,6 +66,7 @@ jobs:
           VISA_DESC_BY_CITY: ${{ vars.VISA_DESC_BY_CITY }}
           VISA_CUTOFF: ${{ vars.VISA_CUTOFF }}
           VISA_INCLUDE_EMERGENCY: ${{ vars.VISA_INCLUDE_EMERGENCY }}
+          VISA_EMERGENCY_TYPES: ${{ vars.VISA_EMERGENCY_TYPES }}
           VISA_PUSH_REPEAT: ${{ vars.VISA_PUSH_REPEAT }}
           VISA_PUSH_INTERVAL: ${{ vars.VISA_PUSH_INTERVAL }}
           PYTHONUTF8: "1"

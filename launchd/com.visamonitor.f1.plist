@@ -50,6 +50,8 @@
     <key>VISA_CUTOFF</key><string>2026-12-31</string>
     <!-- emergency-only slots (官方紧急申请 - 不是普通号): 0 = ignore (default), 1 = include -->
     <key>VISA_INCLUDE_EMERGENCY</key><string>0</string>
+    <!-- visa types sharing ONE emergency slot pool (used by "emergency status") -->
+    <key>VISA_EMERGENCY_TYPES</key><string>F-1,J-1</string>
     <!-- repeat each new alert this many times, this many seconds apart -->
     <key>VISA_PUSH_REPEAT</key><string>6</string>
     <key>VISA_PUSH_INTERVAL</key><string>5</string>
