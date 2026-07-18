@@ -212,6 +212,9 @@ def _desc_filter(city: str) -> str:
 
 
 # How to treat rows tagged 官方紧急申请 - 不是普通号 ("emergency-only" slots):
+# Prefixed to a title whenever a date on/before the cutoff exists.
+ALERT_MARK = "‼️"
+
 EMG_EXCLUDE = "exclude"   # regular slots only  -> the "status" view and normal alerts
 EMG_ONLY = "only"         # emergency slots only -> the "emergency status" view
 EMG_INCLUDE = "include"   # both
@@ -402,7 +405,8 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
                 cats = " (" + ", ".join(sorted(_short_desc(d) for d in descs)) + ")"
             lines.append(f"{c}: earliest {ds[0]}, {len(ds)} date{plural}{cats}")
         loc = f"{len(summary)} location{'' if len(summary) == 1 else 's'}"
-        title = f"{VISA_PREFIX} · {loc} by {CUTOFF}"
+        # An alert only fires because a date qualified, so it always leads with ‼️.
+        title = f"{ALERT_MARK} {VISA_PREFIX} · {loc} by {CUTOFF}"
         body = "\n".join(lines)
         push_repeated(title, body)
         print(f"[{stamp}] PUSHED x{PUSH_REPEAT} (every {PUSH_INTERVAL}s): " + " | ".join(lines))
@@ -516,7 +520,9 @@ def build_status(data: dict, emergency: str = EMG_EXCLUDE) -> tuple[str, str]:
         what = f"{VISA_PREFIX} status (regular + emergency)"
     else:
         what = f"{VISA_PREFIX} status"
-    title = (f"{what} · {hits} at/before {CUTOFF}" if hits
+    # Lead with ‼️ whenever something is actually on/before the cutoff, so a
+    # hit is obvious from the notification title alone.
+    title = (f"{ALERT_MARK} {what} · {hits} at/before {CUTOFF}" if hits
              else f"{what} · none by {CUTOFF}")
     return title, "\n".join(text for _, text in lines)
 
