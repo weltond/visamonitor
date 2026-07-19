@@ -60,6 +60,8 @@ jobs:
         env:
           PLAYWRIGHT_BROWSERS_PATH: /ms-playwright   # use the image's pre-installed browsers
           VISA_NTFY_TOPIC: ${{ secrets.VISA_NTFY_TOPIC }}
+          VISA_EMAIL: ${{ secrets.VISA_EMAIL }}          # optional e-mail copy of alerts
+          VISA_NTFY_TOKEN: ${{ secrets.VISA_NTFY_TOKEN }}  # required for e-mail forwarding
           VISA_CITIES: ${{ vars.VISA_CITIES }}
           VISA_TYPE: ${{ vars.VISA_TYPE }}
           VISA_DESC: ${{ vars.VISA_DESC }}

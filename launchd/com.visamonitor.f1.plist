@@ -53,6 +53,11 @@
     <!-- visa types sharing ONE emergency slot pool (used by "emergency status") -->
     <key>VISA_EMERGENCY_TYPES</key><string>F-1,J-1</string>
     <!-- repeat each new alert this many times, this many seconds apart -->
+    <!-- optional 2nd channel: ntfy e-mails a copy of each ALERT here.
+         ntfy.sh refuses anonymous e-mail, so VISA_NTFY_TOKEN must hold an
+         access token from a (free) ntfy account. Leave both empty to disable. -->
+    <key>VISA_EMAIL</key><string></string>
+    <key>VISA_NTFY_TOKEN</key><string></string>
     <key>VISA_PUSH_REPEAT</key><string>6</string>
     <key>VISA_PUSH_INTERVAL</key><string>5</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>

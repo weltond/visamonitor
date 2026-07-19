@@ -164,6 +164,22 @@ gh variable set VISA_CITIES --body "广州,北京"      # etc., one per setting
 | `VISA_CUTOFF` | Alert on dates **on or before** this, inclusive (ISO) | `2026-12-31` |
 | `VISA_INCLUDE_EMERGENCY` | Let **alerts** include "官方紧急申请 - 不是普通号" emergency-only slots. `0` = ignore (default), `1` = include. (Does not affect the `emergency status` view.) | `0` |
 | `VISA_EMERGENCY_TYPES` | Visa badges sharing one emergency slot pool; used only by `emergency status` | `F-1,J-1` |
+
+**Optional second channel — e-mail.** Set these two as **Secrets** (not
+Variables — an address is personal) to have ntfy forward a copy of each *alert*
+by e-mail. Useful because ntfy's iOS push path (ntfy.sh → Firebase → APNs) is
+[known to be unreliable](https://docs.ntfy.sh/known-issues/), so e-mail gives
+iPhone/Apple Watch a channel that doesn't depend on it.
+
+| Secret | Meaning |
+|--------|---------|
+| `VISA_EMAIL` | Address to receive a copy of each alert. Empty = disabled. |
+| `VISA_NTFY_TOKEN` | Access token from a free [ntfy.sh account](https://ntfy.sh/account) — **required**, since ntfy.sh rejects anonymous e-mail (`code 40053`). |
+
+Only the **first** of the repeated copies carries the e-mail header, so one
+alert = one e-mail, not six. Status replies are never e-mailed. If e-mail
+forwarding fails for any reason, the push is retried without it — a broken
+e-mail setup can never suppress an alert.
 | `VISA_PUSH_REPEAT` | Repeat each new alert this many times (numbered `i/N`) so you don't miss it | `6` |
 | `VISA_PUSH_INTERVAL` | Seconds between those repeats | `5` |
 

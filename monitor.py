@@ -80,6 +80,11 @@ PUSH_REPEAT = max(1, int(_env("PUSH_REPEAT", "6") or 6))
 PUSH_INTERVAL = max(0, int(_env("PUSH_INTERVAL", "5") or 5))
 NTFY_TOPIC = _env("NTFY_TOPIC")                      # ntfy.sh topic to publish to (REQUIRED for push)
 NTFY_SERVER = _env("NTFY_SERVER", "https://ntfy.sh")
+# Optional second channel: ntfy forwards a copy of an ALERT to this address.
+# ntfy.sh rejects anonymous email sending ("code 40053"), so NTFY_TOKEN must
+# hold an access token from a (free) ntfy account for this to work.
+EMAIL_TO = _env("EMAIL")
+NTFY_TOKEN = _env("NTFY_TOKEN")
 STATE_FILE = Path(_env("STATE") or Path(__file__).with_name("state.json"))
 _today = _env("TODAY")
 TODAY = dt.date.fromisoformat(_today) if _today else dt.date.today()
@@ -304,18 +309,24 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
-def push(title: str, body: str, click: str = URL, priority: str = "urgent") -> None:
+def push(title: str, body: str, click: str = URL, priority: str = "urgent",
+         email: str = "") -> None:
     if not NTFY_TOPIC:
         print("[warn] VISA_NTFY_TOPIC not set -- skipping push. Message was:\n", title, body)
         return
+    headers = {
+        "Title": title.encode("utf-8").decode("latin-1", "ignore"),
+        "Priority": priority,
+        "Click": click,
+    }
+    if email:
+        headers["Email"] = email          # ntfy forwards a copy by e-mail
+    if NTFY_TOKEN:
+        headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
     req = urllib.request.Request(
         f"{NTFY_SERVER}/{urllib.parse.quote(NTFY_TOPIC)}",
         data=body.encode("utf-8"),
-        headers={
-            "Title": title.encode("utf-8").decode("latin-1", "ignore"),
-            "Priority": priority,
-            "Click": click,
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=20) as r:
@@ -330,10 +341,21 @@ def push_repeated(title: str, body: str, click: str = URL) -> None:
         return
     for i in range(PUSH_REPEAT):
         suffix = f" ({i + 1}/{PUSH_REPEAT})" if PUSH_REPEAT > 1 else ""
+        # Only the FIRST copy carries the e-mail header -- one e-mail per alert,
+        # not one per repeat.
+        email = EMAIL_TO if i == 0 else ""
         try:
-            push(title + suffix, body, click)
+            push(title + suffix, body, click, email=email)
         except Exception as e:
             print(f"[push] copy {i + 1}/{PUSH_REPEAT} failed: {e}", flush=True)
+            if email:
+                # E-mail forwarding can fail on its own (no ntfy account/token,
+                # quota). It must never take the actual alert down with it.
+                print("[push] retrying copy 1 without e-mail forwarding", flush=True)
+                try:
+                    push(title + suffix, body, click)
+                except Exception as e2:
+                    print(f"[push] retry also failed: {e2}", flush=True)
         if i < PUSH_REPEAT - 1:
             time.sleep(PUSH_INTERVAL)
 
