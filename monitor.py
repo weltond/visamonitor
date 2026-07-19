@@ -480,6 +480,22 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
         push_repeated(title, body)
         print(f"[{stamp}] PUSHED x{PUSH_REPEAT} (every {PUSH_INTERVAL}s): " + " | ".join(lines))
 
+    # Tell the user when the upstream feed recovers. While qmq is frozen we
+    # cannot see new slots at all, so "source is live again" is itself news.
+    was_stale = bool(state.get("src_stale"))
+    is_stale = freshest is not None and freshest >= STALE_AFTER_MIN
+    if was_stale and not is_stale:
+        push(f"{VISA_PREFIX} source is LIVE again",
+             f"qmq data is fresh again (freshest row {freshest:.0f}m old).\n"
+             f"Slot monitoring is effective from now on.", priority="high")
+        print(f"[{stamp}] SOURCE RECOVERED (age {freshest:.0f}m) -- notified", flush=True)
+    elif is_stale and not was_stale:
+        push(f"{VISA_PREFIX} source went STALE",
+             f"qmq has stopped publishing (freshest row {freshest / 60:.1f}h old).\n"
+             f"New slots cannot be detected until it recovers.", priority="default")
+        print(f"[{stamp}] SOURCE WENT STALE (age {freshest:.0f}m) -- notified", flush=True)
+    state["src_stale"] = is_stale
+
     # Persist current qualifying set so we only alert on genuinely new dates.
     state["last_matches"] = fp
     state["last_checked"] = stamp
