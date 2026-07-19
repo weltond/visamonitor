@@ -187,6 +187,9 @@ alert = one e-mail, not six. Status replies are never e-mailed. If e-mail
 forwarding fails for any reason, the push is retried without it — a broken
 e-mail setup can never suppress an alert.
 | `VISA_PUSH_REPEAT` | Repeat each new alert this many times (numbered `i/N`) so you don't miss it | `6` |
+| `VISA_BURST_MINUTES` | Minutes of the hour when slots are released — poll fast around these. Empty = never burst. (`--watch` only) | `0,30` |
+| `VISA_BURST_WINDOW` | Seconds either side of each mark that count as "near" | `60` |
+| `VISA_BURST_INTERVAL` | Seconds between checks inside a burst window | `10` |
 | `VISA_PUSH_INTERVAL` | Seconds between those repeats | `5` |
 
 > **Emergency slots:** some rows are tagged `官方紧急申请 - 不是普通号` — these are
@@ -225,7 +228,14 @@ Notes and trade-offs:
 - **Needs an always-on process** — unlike the GitHub cron, it dies if the
   machine sleeps/closes. Run it under `caffeinate`, `tmux`, `nohup`, or a
   launchd/systemd service.
-- **Be gentle:** don't go below ~30–60s. qmq is behind Cloudflare (Error 1015
+- **Burst polling:** consulates release slots on the hour and half hour, and a
+  released slot can be taken within seconds — a flat 60s poll samples those
+  critical moments at random. So within `VISA_BURST_WINDOW` seconds of each
+  `VISA_BURST_MINUTES` mark the loop switches to `VISA_BURST_INTERVAL`
+  (default: ~10 checks across `:29–:31` and `:59–:01`, vs ~2 before), then
+  returns to the normal interval. Minutes-of-the-hour are timezone-independent
+  for whole-hour offsets, so `:30` local is `:30` at the consulate.
+- **Be gentle:** don't go below ~30–60s outside burst windows. qmq is behind Cloudflare (Error 1015
   rate-limiting); aggressive reloads from one IP can get you temporarily
   blocked. The loop adds small random jitter and survives transient blocks.
 

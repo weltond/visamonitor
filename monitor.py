@@ -78,6 +78,13 @@ EMERGENCY_TYPES = [t.strip() for t in _env("EMERGENCY_TYPES", "F-1,J-1").split("
 # seconds apart, so you don't overlook it.
 PUSH_REPEAT = max(1, int(_env("PUSH_REPEAT", "6") or 6))
 PUSH_INTERVAL = max(0, int(_env("PUSH_INTERVAL", "5") or 5))
+# Slots are released on the hour and half hour, so a fixed 60s poll samples the
+# critical seconds at random. Around each mark we poll much faster.
+# NOTE: these are minutes-of-the-hour, which are identical in any whole-hour
+# timezone -- :30 local is :30 Beijing -- so no timezone conversion is needed.
+BURST_MARKS = [int(x) for x in _env("BURST_MINUTES", "0,30").split(",") if x.strip().isdigit()]
+BURST_WINDOW = max(0, int(_env("BURST_WINDOW", "60") or 60))       # seconds either side of a mark
+BURST_INTERVAL = max(2, int(_env("BURST_INTERVAL", "10") or 10))   # seconds between checks inside it
 NTFY_TOPIC = _env("NTFY_TOPIC")                      # ntfy.sh topic to publish to (REQUIRED for push)
 NTFY_SERVER = _env("NTFY_SERVER", "https://ntfy.sh")
 # Optional second channel: ntfy forwards a copy of an ALERT to this address.
@@ -615,6 +622,22 @@ def run_once() -> int:
     return 0
 
 
+def in_burst_window(now: dt.datetime) -> bool:
+    """True when within BURST_WINDOW seconds of a slot-release mark (:00/:30).
+
+    Distance is measured around the hour, so :59:30 correctly counts as near
+    the :00 mark.
+    """
+    if not BURST_MARKS:
+        return False
+    secs = now.minute * 60 + now.second
+    for mark in BURST_MARKS:
+        diff = abs(secs - mark * 60)
+        if min(diff, 3600 - diff) <= BURST_WINDOW:
+            return True
+    return False
+
+
 def run_watch(interval: int, recycle: int = 40) -> int:
     """Keep ONE browser open and re-check every ~`interval` seconds (near real-time).
 
@@ -635,8 +658,10 @@ def run_watch(interval: int, recycle: int = 40) -> int:
         page = _new_page(browser)
         n = 0
         try:
+            was_hot = False
             while True:
                 n += 1
+                started = time.monotonic()
                 try:
                     check_and_notify(render_and_extract(page, TODAY))
                 except Exception as e:
@@ -650,12 +675,25 @@ def run_watch(interval: int, recycle: int = 40) -> int:
                     except Exception:
                         pass
                     page = _new_page(browser)
-                # Idle until the next cycle, but stay responsive to commands:
-                # poll the queue every second and answer on THIS thread.
-                deadline = time.monotonic() + interval + random.uniform(0, min(15, interval * 0.25))
-                while time.monotonic() < deadline:
+                # Near a release mark, poll fast; otherwise use the normal
+                # interval (with jitter so we aren't perfectly periodic).
+                hot = in_burst_window(dt.datetime.now())
+                if hot != was_hot:
+                    print(f"[watch] {'ENTERING' if hot else 'leaving'} burst mode "
+                          f"({BURST_INTERVAL}s cadence)", flush=True)
+                    was_hot = hot
+                gap = BURST_INTERVAL if hot else interval + random.uniform(0, min(15, interval * 0.25))
+                # Measure from the START of the check so a slow render eats into
+                # the wait rather than stretching the cadence.
+                deadline = started + gap
+                # Idle until then, but stay responsive to commands: poll the
+                # queue and answer on THIS thread (Playwright isn't thread-safe).
+                while True:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
                     try:
-                        mode = COMMANDS.get(timeout=1.0)
+                        mode = COMMANDS.get(timeout=min(1.0, left))
                     except queue.Empty:
                         continue
                     try:

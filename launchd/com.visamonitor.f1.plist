@@ -58,6 +58,11 @@
          access token from a (free) ntfy account. Leave both empty to disable. -->
     <key>VISA_EMAIL</key><string></string>
     <key>VISA_NTFY_TOKEN</key><string></string>
+    <!-- slots are released on the hour/half hour: poll fast around those marks.
+         BURST_MINUTES = minutes of the hour, WINDOW = seconds either side. -->
+    <key>VISA_BURST_MINUTES</key><string>0,30</string>
+    <key>VISA_BURST_WINDOW</key><string>60</string>
+    <key>VISA_BURST_INTERVAL</key><string>10</string>
     <key>VISA_PUSH_REPEAT</key><string>6</string>
     <key>VISA_PUSH_INTERVAL</key><string>5</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>
