@@ -85,6 +85,8 @@ PUSH_INTERVAL = max(0, int(_env("PUSH_INTERVAL", "5") or 5))
 BURST_MARKS = [int(x) for x in _env("BURST_MINUTES", "0,30").split(",") if x.strip().isdigit()]
 BURST_WINDOW = max(0, int(_env("BURST_WINDOW", "60") or 60))       # seconds either side of a mark
 BURST_INTERVAL = max(2, int(_env("BURST_INTERVAL", "10") or 10))   # seconds between checks inside it
+# Flag qmq's own feed as stale once its freshest row is older than this (minutes).
+STALE_AFTER_MIN = float(_env("STALE_AFTER_MIN", "30") or 30)
 NTFY_TOPIC = _env("NTFY_TOPIC")                      # ntfy.sh topic to publish to (REQUIRED for push)
 NTFY_SERVER = _env("NTFY_SERVER", "https://ntfy.sh")
 # Optional second channel: ntfy forwards a copy of an ALERT to this address.
@@ -122,6 +124,7 @@ EXTRACT_JS = r"""
   const DESCK = /(Visa|Student|Crew|Waiver|Others|specialty|professionals|Exchange)/i;
   const COUNT = /^(\D*?)(\d[\d,]*)\s*个可用日期$/;
   const EMERG = /官方紧急申请|不是普通号/;  // emergency-only slot tag
+  const UPD   = /(刚刚|\d+\s*(秒|分钟|小时|天)前)更新$/;  // how stale qmq's own data is
 
   // City sections start at each "count" line; city name is on that line or the one before.
   const secs = [];
@@ -142,8 +145,9 @@ EXTRACT_JS = r"""
       const part = seg.slice(h.i, end);
       const status = part.find(s => s === '有位' || s === '紧缺') || '?';
       const emergency = part.some(s => EMERG.test(s));
+      const updated = (part.find(s => UPD.test(s)) || '');
       const dates = part.filter(s => /^\d{1,2}月\d{1,2}日$/.test(s));
-      return { badge: h.badge, desc: h.desc, status, emergency, dates };
+      return { badge: h.badge, desc: h.desc, status, emergency, updated, dates };
     });
   };
   const cities = secs.map((s, k) => {
@@ -153,6 +157,23 @@ EXTRACT_JS = r"""
   return { cities };
 }
 """
+
+
+def parse_age_minutes(txt: str):
+    """'刚刚更新'->0, '8分钟前更新'->8, '2小时前更新'->120, '1天前更新'->1440.
+
+    This is qmq's OWN staleness: how long ago they last refreshed that row. If
+    it is hours, no polling rate on our side can see new slots -- the upstream
+    feed simply is not publishing.
+    """
+    if not txt:
+        return None
+    if "刚刚" in txt:
+        return 0.0
+    mm = re.search(r"(\d+)\s*(秒|分钟|小时|天)前", txt)
+    if not mm:
+        return None
+    return int(mm.group(1)) * {"秒": 1 / 60, "分钟": 1, "小时": 60, "天": 1440}[mm.group(2)]
 
 
 def parse_cn_date(chip: str, today: dt.date) -> dt.date:
@@ -383,7 +404,24 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
     found = [c for c in CITIES if c in idx]
     missing = [c for c in CITIES if c not in idx]
     note = f"parsed {len(found)}/{len(CITIES)} cities" + (f"; MISSING {','.join(missing)}" if missing else "")
-    print(f"[{stamp}] STATUS: OK ({note})", flush=True)
+    # How stale is qmq's OWN data? If their freshest row is hours old they are
+    # not publishing, and no polling rate of ours can surface a new slot.
+    ages = []
+    for c in data.get("cities", []):
+        if c["city"] not in CITIES:
+            continue
+        for r in c["rows"]:
+            a = parse_age_minutes(r.get("updated", ""))
+            if a is not None:
+                ages.append(a)
+    freshest = min(ages) if ages else None
+    if freshest is None:
+        age_note = ""
+    elif freshest >= STALE_AFTER_MIN:
+        age_note = f"; qmq data STALE (freshest row {freshest / 60:.1f}h old)"
+    else:
+        age_note = f"; qmq freshest {freshest:.0f}m"
+    print(f"[{stamp}] STATUS: OK ({note}{age_note})", flush=True)
 
     matches = find_matches(data, TODAY, cutoff)
     # Fingerprint keyed by city+category so alerts are per-city and dedup correctly.
@@ -463,7 +501,8 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
                     r["dates"][:3]
                 for r in c["rows"] if r["dates"]
             }
-        line = json.dumps({"t": stamp, "matched": fp, "seen": snapshot}, ensure_ascii=False)
+        line = json.dumps({"t": stamp, "matched": fp, "src_age_min": freshest,
+                           "seen": snapshot}, ensure_ascii=False)
         with HISTORY_FILE.open("a") as fh:
             fh.write(line + "\n")
     except Exception:
