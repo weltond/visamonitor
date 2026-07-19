@@ -176,6 +176,12 @@ iPhone/Apple Watch a channel that doesn't depend on it.
 | `VISA_EMAIL` | Address to receive a copy of each alert. Empty = disabled. |
 | `VISA_NTFY_TOKEN` | Access token from a free [ntfy.sh account](https://ntfy.sh/account) — **required**, since ntfy.sh rejects anonymous e-mail (`code 40053`). |
 
+To store the token without hand-editing anything, run
+[`scripts/set-ntfy-token.sh`](scripts/set-ntfy-token.sh): it prompts for the
+token (hidden, so it stays out of your shell history), writes it into the
+installed launchd plist, restarts the watcher, and offers to set the GitHub
+secret too.
+
 Only the **first** of the repeated copies carries the e-mail header, so one
 alert = one e-mail, not six. Status replies are never e-mailed. If e-mail
 forwarding fails for any reason, the push is retried without it — a broken
