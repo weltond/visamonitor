@@ -86,6 +86,8 @@ NTFY_SERVER = _env("NTFY_SERVER", "https://ntfy.sh")
 EMAIL_TO = _env("EMAIL")
 NTFY_TOKEN = _env("NTFY_TOKEN")
 STATE_FILE = Path(_env("STATE") or Path(__file__).with_name("state.json"))
+# Append-only audit trail of every check (see check_and_notify).
+HISTORY_FILE = Path(_env("HISTORY") or Path(__file__).with_name("history.jsonl"))
 _today = _env("TODAY")
 TODAY = dt.date.fromisoformat(_today) if _today else dt.date.today()
 URL = "https://qmq.app"
@@ -437,6 +439,28 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
     state["last_matches"] = fp
     state["last_checked"] = stamp
     save_state(state)
+
+    # Durable audit trail: one compact line per check. watch.log can be rotated
+    # or truncated; this is what lets you reconstruct "what did we see at time
+    # T?" after a suspected miss.
+    try:
+        snapshot = {}
+        for c in data.get("cities", []):
+            if c["city"] not in CITIES:
+                continue
+            # Record EVERY visa type, not just the watched one -- otherwise a
+            # later "was there a J-1 slot at time T?" question is unanswerable.
+            # "!" marks an 官方紧急申请 emergency-only row.
+            snapshot[c["city"]] = {
+                f"{r['badge']} {_short_desc(r['desc'])}" + ("!" if r.get("emergency") else ""):
+                    r["dates"][:3]
+                for r in c["rows"] if r["dates"]
+            }
+        line = json.dumps({"t": stamp, "matched": fp, "seen": snapshot}, ensure_ascii=False)
+        with HISTORY_FILE.open("a") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass  # auditing must never break monitoring
 
 
 def parse_command(text: str) -> str | None:

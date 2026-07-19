@@ -1,5 +1,6 @@
-state.json
 *.log
-__pycache__/
 *.pyc
 .DS_Store
+__pycache__/
+history.jsonl
+state.json
