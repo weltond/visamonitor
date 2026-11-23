@@ -1,213 +1,145 @@
 # visaMonitor — US visa appointment monitor
 
-Watches the live US visa appointment availability grid on
-[qmq.app](https://qmq.app) and sends a **phone push** the moment an interview
-date on or before your target date appears at any consulate you care about.
-Runs itself on **GitHub Actions** (free, in the cloud, works while your computer
-is off), with an optional local watch mode for ~60s reaction time.
-
-You choose the visa type, sub-category, consulates and cutoff — see
-**[Configuration](#configuration)**. All of it lives in repo Variables/Secrets,
-never in this repo, so a public fork discloses nothing about *your* search.
-
-Why a browser and not a simple `curl`: qmq.app renders its grid client-side over
-a Supabase-Realtime (Phoenix) websocket — the raw HTML is empty and there is no
-JSON API — so the monitor renders the page headless with Chromium and reads the
-DOM.
+Monitors the public **recent successful grabs** feed on [qmq.app](https://qmq.app).
+When a new record matches your consulate, visa type and date cutoff, GitHub Actions
+can send a phone notification through Bark, ntfy, or both. Chromium renders the
+feed cards. You can use GitHub Actions and Bark's public server without a VPS or
+US visa scheduling credentials.
 
 ### What an alert looks like
 
-A per-location summary (earliest date + count, soonest location first) — not a
-wall of dates. It lists **every** location with a qualifying date, and is
-repeated 6× so you don't miss it:
+Bark sends one notification per new batch. Each consulate and visa type shows its
+earliest date and, when applicable, how many dates were found in the batch.
 
 ```
-F-1 Graduate · 3 locations by YYYY-MM-DD
-北京: earliest 2026-09-21, 4 dates
-广州: earliest 2026-10-13, 3 dates
-沈阳: earliest 2026-10-15, 2 dates
+上海美签发现新号源！
+签证类型：B1/B2
+领事馆：上海
+可预约日期：2027-01-15
+请尽快进入官网查看并预约。日期以官网为准。
 ```
 
-(Tapping the notification opens qmq.app.)
+Tapping the Bark notification opens [US Visa Scheduling](https://www.usvisascheduling.com/).
+The date comes from a third-party release signal. Check the official site for
+current availability. ntfy keeps its date list, click-through to qmq.app, repeat
+count and optional e-mail copy.
 
 ### On-demand status check
 
-Alerts only fire when a date meets your cutoff. To ask "what's the earliest slot
-right now?" at any time, request a **status** — it reports the earliest date at
-*every* location you watch, ignoring the cutoff, and marks with ✓ any that
-already qualify. It's a single, non-urgent push and never touches the alert
-dedup state, so it can't suppress a real alert.
-
-There are two **mutually exclusive** views, both honouring your per-city
-category rules (`VISA_DESC` + `VISA_DESC_BY_CITY`):
-
-| Command | Reports | Filtering |
-|---------|---------|-----------|
-| `status` | **regular** slots only — what a normal applicant can book | `VISA_TYPE` + your per-city sub-category rules |
-| `emergency status` | **only** rows tagged `官方紧急申请 - 不是普通号` | `VISA_EMERGENCY_TYPES`, **all** sub-categories, every city |
-
-Keeping them separate matters: an emergency slot is often much earlier than any
-regular one, so mixing them would make a location look bookable when it isn't.
-
-The emergency view filters differently **on purpose**, because that pool is
-allocated differently: the visa types in `VISA_EMERGENCY_TYPES` (default
-`F-1,J-1`) draw on **one shared pool**, and its F-1 sub-categories aren't
-distinguished. Applying the regular narrowing there would hide slots that are
-genuinely available — so the emergency view ignores `VISA_DESC` /
-`VISA_DESC_BY_CITY` and reports which visa type each location's slots came from.
-
-Three ways to trigger:
+Status shows recent grab dates for each watched location, including dates past
+the cutoff, and marks qualifying locations with ✓. It sends one push per
+selected channel and leaves the alert history alone. `emergency-status` and
+`--emergency` remain aliases for status because the public feed has no emergency
+slot tag.
 
 | From | How |
 |------|-----|
-| **Your phone** | Send `status` or `emergency status` as a message to your ntfy topic — the running watcher replies in ~1s |
-| **GitHub** | Actions → *visaMonitor F-1* → **Run workflow** → mode `status` / `emergency-status` (works with your computer off) |
-| **Terminal** | `python monitor.py --check` (add `--emergency` for the emergency-only view) |
+| Your phone | Send `status` to your ntfy topic while the local watcher is running with ntfy enabled |
+| GitHub | Actions → **visaMonitor F-1** → **Run workflow** → **status** |
+| Terminal | `python3 monitor.py --check` |
 
-```
-F-1 status · none by 2026-12-31
-广州: 2026-09-15, 48 dates (All Others, All Students, Graduate / PhD students)
-武汉: 2026-10-09, 9 dates
-北京: 2026-10-20, 19 dates
+## Set up Bark for Shanghai B1/B2
 
-F-1 emergency status (官方紧急申请 only) · none by 2026-12-31
-武汉: 2026-08-26, 1 date
-广州: none
-北京: none
-```
+1. Install [Bark](https://github.com/Finb/Bark) on your iPhone and copy the device
+   key from the app's push setup. In **Settings → Notifications → Bark**, allow
+   notifications, Lock Screen alerts and Time Sensitive Notifications. If
+   testing in a Focus mode, allow time-sensitive notifications in that Focus
+   as well.
+2. In your GitHub repository, open **Settings → Secrets and variables →
+   Actions → Secrets**. Create a repository secret named `VISA_BARK_KEY` with
+   the device key alone. Keep it out of source files and workflow Variables.
+3. In the **Variables** tab, set the example values below. Set the cutoff to
+   your target date. The last two rows are optional because they match the defaults.
 
-> The phone trigger needs the **local watcher** running (only it holds an open
-> connection to the topic). If your machine is off, use the GitHub trigger.
+   | Variable | Example |
+   |----------|---------|
+   | `VISA_CITIES` | `上海` |
+   | `VISA_TYPE` | `B1/B2` |
+   | `VISA_CUTOFF` | `2027-01-31` |
+   | `VISA_NOTIFY_CHANNELS` | `bark` |
+   | `VISA_BARK_SERVER` | `https://api.day.app` |
+   | `VISA_BARK_LEVEL` | `timeSensitive` |
 
----
+4. Commit and push the changes to your repository's default branch. In **Actions**,
+   enable workflows if prompted. Lock your iPhone, then use **visaMonitor F-1 →
+   Run workflow → test-push** from another device. Look for `[bark] push accepted`
+   in **Check availability**, verify the test message appears on the lock screen,
+   and tap it to confirm the official site opens.
+5. Run the workflow again in **monitor** mode and look for `STATUS: OK`. A fresh
+   cache records a baseline. Subsequent runs alert on new matching records.
+   The existing five-minute schedule stays in place. GitHub may delay runs.
 
-## Setup (about 5 minutes)
+`test-push` uses the selected channels and does not scrape qmq.app or touch the
+monitor state. It exits with an error if any selected channel fails. Bark API
+acceptance and iPhone notification display are separate checks.
 
-### 1. Get push notifications on your phone (ntfy — free, no account)
+## Set up ntfy (optional)
 
-1. Install the **ntfy** app: [iOS](https://apps.apple.com/app/ntfy/id1625396347) · [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)
-2. Generate a private, unguessable topic name and subscribe to it in the app
-   (**+ Subscribe to topic**):
+Install [ntfy for iOS](https://apps.apple.com/app/ntfy/id1625396347) or
+[Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy).
+Generate a private topic with `echo "visamonitor-$(openssl rand -hex 8)"`,
+subscribe to that topic in the app and set the repository secret
+`VISA_NTFY_TOPIC` to its value. Anyone who knows an unprotected topic can read
+or send its messages, so treat the name as a secret.
 
-   ```bash
-   echo "visamonitor-$(openssl rand -hex 8)"
-   ```
-
-   > ⚠️ **Treat this like a password.** ntfy topics are unauthenticated: anyone
-   > who learns yours can read every alert you receive *and* push fake ones to
-   > your phone. Never commit it — keep it in a GitHub **secret** and in your
-   > local (uncommitted) launchd plist only. If it ever leaks, generate a new
-   > one and re-subscribe.
-3. Test it from a terminal — your phone should buzz:
-
-   ```bash
-   curl -d "hello from visaMonitor" ntfy.sh/YOUR_TOPIC
-   ```
-
-### 2. Put this folder on GitHub as a **public** repo
-
-Keep it public so Actions minutes stay free (a 5-minute cron far exceeds the
-private-repo free budget). No secrets live in the code — only in step 3.
-
-```bash
-cd ~/PythonProjects/visaMonitor
-git init && git add . && git commit -m "visaMonitor F-1"
-gh repo create visaMonitor --public --source=. --push   # or create it in the GitHub UI
-```
-
-### 3. Add your push topic as a repo secret
-
-Repo → **Settings → Secrets and variables → Actions → New repository secret**
-
-| Name | Value |
-|------|-------|
-| `VISA_NTFY_TOPIC` | `YOUR_TOPIC` |
-
-### 4. Turn it on and test
-
-1. Repo → **Actions** tab → enable workflows if prompted.
-2. Open **“visaMonitor F-1” → Run workflow** (manual trigger).
-3. Open the run’s log for the **Check availability** step. You want to see:
-
-   ```
-   STATUS: OK (parsed 5/5 cities)
-   F-1 [Graduate]: no date by YYYY-MM-DD. Earliest: 广州=…; 北京=…; 上海=…; 沈阳=…; 武汉=…
-   ```
-
-   - `STATUS: OK` → the scrape works from GitHub’s servers. You’re done; it now
-     runs every ~5 min automatically.
-   - `STATUS: SCRAPE_FAILED (cloudflare)` → GitHub’s IP got blocked by
-     Cloudflare. See **Troubleshooting** below.
-
-That’s it. When a matching date opens, your phone buzzes with the
-dates and a tap-through to qmq.app.
-
----
+If `VISA_NOTIFY_CHANNELS` is unset or empty, ntfy is used as before. Choose
+`bark,ntfy` to send to both. Each channel runs independently. To have ntfy forward
+release alerts by e-mail, optionally set the repository secrets `VISA_EMAIL` and
+`VISA_NTFY_TOKEN` (an access token from [your ntfy account](https://ntfy.sh/account)).
+Only the first ntfy copy requests e-mail. If it fails, the copy is retried
+without e-mail forwarding. The [token setup script](scripts/set-ntfy-token.sh)
+is available for the optional local launchd watcher.
 
 ## Configuration
 
-Set these as repo **Variables** (Settings → Secrets and variables → Actions →
-**Variables**), *not* in the workflow file — that keeps your search private even
-though the repo is public. The workflow reads them via `${{ vars.* }}`; anything
-you leave unset falls back to a neutral default.
+| Environment variable | Purpose and default |
+|----------------------|---------------------|
+| `VISA_NOTIFY_CHANNELS` | `ntfy` (default), `bark`, or `bark,ntfy` |
+| `VISA_BARK_KEY` | Bark device key. Required for Bark. Use a GitHub Secret. |
+| `VISA_BARK_SERVER` | Server base URL, without the device key or `/push`. Default `https://api.day.app`. Use HTTPS for remote servers. |
+| `VISA_BARK_LEVEL` | `timeSensitive` (default), `active`, `passive` or `critical` |
+| `VISA_CITIES` | Comma-separated consulate names as shown in the feed. Default `广州,北京,上海,沈阳,武汉`. |
+| `VISA_TYPE` | Visa badge prefix, case-sensitive. Default `H-1B`. |
+| `VISA_CUTOFF` | Last qualifying interview date (inclusive, ISO `YYYY-MM-DD`). Default 60 days ahead. |
+| `VISA_PUSH_REPEAT` | Number of ntfy copies per release alert (default 6). |
+| `VISA_PUSH_INTERVAL` | Seconds between ntfy copies (default 5). |
+| `VISA_BURST_MINUTES` | Minutes of the hour to poll faster (default `0,30`, local `--watch` only). |
+| `VISA_BURST_WINDOW` | Seconds on either side of a burst minute (default 60, local only). |
+| `VISA_BURST_INTERVAL` | Seconds between checks during a burst (default 10, local only). |
 
-```bash
-gh variable set VISA_CITIES --body "广州,北京"      # etc., one per setting
-```
-
-| Variable | Meaning | Example |
-|----------|---------|---------|
-| `VISA_CITIES` | Consulate cities to watch, comma-separated, Chinese names. Only cities on the default view load (the 5 China cities); others need their country tab, not yet automated. | `广州,北京,上海,沈阳,武汉` |
-| `VISA_TYPE` | Visa badge prefix (matches all sub-categories) | `F-1`, `B1/B2`, `H-1B` |
-| `VISA_DESC` | Default: narrow to one sub-category by description text (case-insensitive substring); empty = all | `Graduate` (Graduate/PhD), `All Students`, `All Others` |
-| `VISA_DESC_BY_CITY` | **Per-city override** of `VISA_DESC`, as `城市=值` pairs. `ALL` = watch every sub-category in that city. | `上海=ALL` |
-| `VISA_CUTOFF` | Alert on dates **on or before** this, inclusive (ISO) | `2026-12-31` |
-| `VISA_INCLUDE_EMERGENCY` | Let **alerts** include "官方紧急申请 - 不是普通号" emergency-only slots. `0` = ignore (default), `1` = include. (Does not affect the `emergency status` view.) | `0` |
-| `VISA_EMERGENCY_TYPES` | Visa badges sharing one emergency slot pool; used only by `emergency status` | `F-1,J-1` |
-
-**Optional second channel — e-mail.** Set these two as **Secrets** (not
-Variables — an address is personal) to have ntfy forward a copy of each *alert*
-by e-mail. Useful because ntfy's iOS push path (ntfy.sh → Firebase → APNs) is
-[known to be unreliable](https://docs.ntfy.sh/known-issues/), so e-mail gives
-iPhone/Apple Watch a channel that doesn't depend on it.
-
-| Secret | Meaning |
-|--------|---------|
-| `VISA_EMAIL` | Address to receive a copy of each alert. Empty = disabled. |
-| `VISA_NTFY_TOKEN` | Access token from a free [ntfy.sh account](https://ntfy.sh/account) — **required**, since ntfy.sh rejects anonymous e-mail (`code 40053`). |
-
-To store the token without hand-editing anything, run
-[`scripts/set-ntfy-token.sh`](scripts/set-ntfy-token.sh): it prompts for the
-token (hidden, so it stays out of your shell history), writes it into the
-installed launchd plist, restarts the watcher, and offers to set the GitHub
-secret too.
-
-Only the **first** of the repeated copies carries the e-mail header, so one
-alert = one e-mail, not six. Status replies are never e-mailed. If e-mail
-forwarding fails for any reason, the push is retried without it — a broken
-e-mail setup can never suppress an alert.
-| `VISA_PUSH_REPEAT` | Repeat each new alert this many times (numbered `i/N`) so you don't miss it | `6` |
-| `VISA_BURST_MINUTES` | Minutes of the hour when slots are released — poll fast around these. Empty = never burst. (`--watch` only) | `0,30` |
-| `VISA_BURST_WINDOW` | Seconds either side of each mark that count as "near" | `60` |
-| `VISA_BURST_INTERVAL` | Seconds between checks inside a burst window | `10` |
-| `VISA_PUSH_INTERVAL` | Seconds between those repeats | `5` |
-
-> **Emergency slots:** some rows are tagged `官方紧急申请 - 不是普通号` — these are
-> only bookable by applicants in the emergency-request pool, so they're excluded
-> by default. When you're eligible, set `VISA_INCLUDE_EMERGENCY=1` (in the plist or
-> workflow) to start alerting on them too; matched emergency dates are flagged
-> `⚠emergency-only` in the logs.
-
-Changing a Variable takes effect on the next scheduled run — no commit needed.
+The public feed supplies city, visa badge, date and record age. The older grid
+settings `VISA_DESC`, `VISA_DESC_BY_CITY`, `VISA_INCLUDE_EMERGENCY` and
+`VISA_EMERGENCY_TYPES` do not affect the current monitor. The original grid
+implementation is archived in `monitor_v1_grid_backup.py`.
 
 ## Run it locally (optional)
 
+A real Bark push test requires Python 3 and a Bark device key. Run this from
+the repository root. It reads the key without echoing it or adding it to shell
+history. Lock the iPhone before pressing Enter.
+
 ```bash
-pip install -r requirements.txt
-python -m playwright install chromium
-VISA_NTFY_TOPIC=YOUR_TOPIC python monitor.py --once   # one check
-python monitor.py --test-push                                # send a test push
+bash -c '
+  read -rsp "Bark device key: " VISA_BARK_KEY && [ -n "$VISA_BARK_KEY" ] || exit 1
+  printf "\n"
+  export VISA_BARK_KEY
+  VISA_NOTIFY_CHANNELS=bark VISA_BARK_SERVER=https://api.day.app \
+    VISA_BARK_LEVEL=timeSensitive VISA_CITIES=上海 VISA_TYPE=B1/B2 \
+    VISA_CUTOFF=2027-01-31 python3 monitor.py --test-push
+'
 ```
+
+For a local feed check, install the browser dependencies and set your search
+and notification environment variables before running:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m playwright install chromium
+python3 monitor.py --once
+```
+
+Run the automated tests with `python3 -m unittest discover -s tests -v`. They
+mock both notification providers and do not send a device notification.
 
 ## Faster: near-real-time watch mode
 
@@ -220,11 +152,8 @@ VISA_NTFY_TOPIC=YOUR_TOPIC python monitor.py --watch 60   # every ~60s
 ```
 
 Notes and trade-offs:
-- **Why it reloads each cycle:** qmq.app fetches its grid once at load and does
-  **not** live-update the page (verified: zero DOM changes while open). So true
-  websocket-style "push the instant it appears" isn't available from the public
-  site without reverse-engineering their private realtime protocol. Reloading
-  every ~60s is the robust equivalent and reacts within a minute.
+- **Feed refresh:** the watcher reloads qmq.app and extracts the public feed on
+  each check.
 - **Needs an always-on process** — unlike the GitHub cron, it dies if the
   machine sleeps/closes. Run it under `caffeinate`, `tmux`, `nohup`, or a
   launchd/systemd service.
@@ -239,8 +168,8 @@ Notes and trade-offs:
   rate-limiting); aggressive reloads from one IP can get you temporarily
   blocked. The loop adds small random jitter and survives transient blocks.
 
-Run it *and* the GitHub cron if you like — dedup state keeps them from
-double-pinging (use separate state files / machines; they don't share state).
+The local watcher and GitHub Actions each have their own state. Running both
+against the same feed can produce two alerts for one release signal.
 
 ### Run the watcher 24/7 on your Mac (launchd)
 
@@ -287,7 +216,7 @@ launchctl bootout gui/$(id -u)/com.visamonitor.f1
 rm ~/Library/LaunchAgents/com.visamonitor.f1.plist
 ```
 
-**Change what it watches:** edit the `EnvironmentVariables` (city / visa / desc /
+**Change what it watches:** edit the `EnvironmentVariables` (city / visa /
 cutoff / topic) or the `--watch 60` interval in
 `~/Library/LaunchAgents/com.visamonitor.f1.plist`, then run the restart block above.
 
@@ -307,11 +236,18 @@ Repo → **Actions → visaMonitor F-1 → ⋯ → Disable workflow**. Re-enable
 
 ## Honest limitations
 
-- **Free monitor, not an auto-grabber.** qmq’s paid service reacts in *seconds*.
-  This tells you a slot *appeared* — it may already be taken by the time you tap
-  through. It shortens your reaction time; it doesn’t book for you.
+- **Release signals.** The feed records dates other users grabbed. Availability
+  can change before you open the official site.
 - **Timing drift.** GitHub delays scheduled runs under load; real cadence can be
   5–15 min, not a strict 5.
+- **Deduplication.** Once a city, visa badge and date enter `state.json`, the same
+  record stays suppressed even if it disappears from the feed and later returns.
+  Dates more than 180 days in the past are pruned. The Actions cache carries
+  state across runs. A missing cache starts a new baseline.
+- **Delivery failures.** Bark makes up to three attempts for transient failures.
+  The monitor then records the feed record as seen, so a failed channel is not
+  replayed on later runs. If a request timed out after the server accepted it, a
+  retry may result in a duplicate. Check the channel logs for delivery errors.
 - **Cloudflare.** If datacenter IPs get blocked, see Troubleshooting.
 
 ## Troubleshooting
@@ -322,7 +258,8 @@ Repo → **Actions → visaMonitor F-1 → ⋯ → Disable workflow**. Re-enable
   be wired in.
 - **`SCRAPE_FAILED (timeout)` occasionally** — a slow render; harmless, the next
   run retries. If it’s *every* run, the site layout may have changed.
-- **`EXTRACT_FAILED`** — the city name or F-1 rows weren’t found; the site’s
-  markup likely changed and the selector in `monitor.py` needs a tweak.
-- **No push but logs show a match** — check the `VISA_NTFY_TOPIC` secret is set
-  and your phone is subscribed to that exact topic.
+- **`EXTRACT_FAILED`** — the monitor could not read feed cards. Check whether the
+  site layout changed.
+- **No notification** — check `VISA_NOTIFY_CHANNELS` and run `test-push`. For
+  Bark, confirm the device key, base URL and iOS notification settings. For
+  ntfy, confirm `VISA_NTFY_TOPIC` and the corresponding app subscription.

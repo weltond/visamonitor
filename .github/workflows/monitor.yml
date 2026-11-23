@@ -11,10 +11,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "monitor = alert only if a date qualifies; status = push earliest slot per location"
+        description: "monitor = check for new signals; status = push a snapshot; test-push = test notification delivery"
         type: choice
         default: monitor
-        options: [monitor, status, emergency-status]
+        options: [monitor, status, emergency-status, test-push]
 
 concurrency:
   group: visamonitor
@@ -37,6 +37,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Playwright Python package
+        if: inputs.mode != 'test-push'
         run: |
           python -m pip --version >/dev/null 2>&1 || python -m ensurepip --upgrade
           python -m pip install --no-cache-dir --break-system-packages -r requirements.txt \
@@ -46,6 +47,7 @@ jobs:
       # Restore the "what have I already alerted" state from the last run so we
       # don't push the same date twice. Rolling key: newest cache wins.
       - name: Restore monitor state
+        if: inputs.mode != 'test-push'
         uses: actions/cache/restore@v4
         with:
           path: state.json
@@ -62,6 +64,10 @@ jobs:
           VISA_NTFY_TOPIC: ${{ secrets.VISA_NTFY_TOPIC }}
           VISA_EMAIL: ${{ secrets.VISA_EMAIL }}          # optional e-mail copy of alerts
           VISA_NTFY_TOKEN: ${{ secrets.VISA_NTFY_TOKEN }}  # required for e-mail forwarding
+          VISA_BARK_KEY: ${{ secrets.VISA_BARK_KEY }}
+          VISA_NOTIFY_CHANNELS: ${{ vars.VISA_NOTIFY_CHANNELS }}
+          VISA_BARK_SERVER: ${{ vars.VISA_BARK_SERVER }}
+          VISA_BARK_LEVEL: ${{ vars.VISA_BARK_LEVEL }}
           VISA_CITIES: ${{ vars.VISA_CITIES }}
           VISA_TYPE: ${{ vars.VISA_TYPE }}
           VISA_DESC: ${{ vars.VISA_DESC }}
@@ -71,17 +77,19 @@ jobs:
           VISA_EMERGENCY_TYPES: ${{ vars.VISA_EMERGENCY_TYPES }}
           VISA_PUSH_REPEAT: ${{ vars.VISA_PUSH_REPEAT }}
           VISA_PUSH_INTERVAL: ${{ vars.VISA_PUSH_INTERVAL }}
+          MONITOR_MODE: ${{ inputs.mode }}
           PYTHONUTF8: "1"
         # Scheduled runs have no inputs, so mode is empty -> "monitor".
         run: |
-          case "${{ inputs.mode }}" in
+          case "$MONITOR_MODE" in
+            test-push)        python monitor.py --test-push ;;
             status)           python monitor.py --check ;;
             emergency-status) python monitor.py --check --emergency ;;
             *)                python monitor.py --once ;;
           esac
 
       - name: Save monitor state
-        if: always()
+        if: always() && inputs.mode != 'test-push'
         uses: actions/cache/save@v4
         with:
           path: state.json

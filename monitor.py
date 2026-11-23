@@ -8,7 +8,7 @@ qmq.app 改版后的适配版（原"城市网格"已下线，见 2026-05-16 站�
     （城市, 签证类型, 日期, 距今）四元组，且分钟级更新。
 
 因此本版监控该 feed：当某个 watched 城市 + 签证类型出现**新的**成功抢位记录、
-且其日期早于等于截止日 VISA_CUTOFF 时，通过 ntfy.sh 推送提醒。语义说明：
+且其日期早于等于截止日 VISA_CUTOFF 时，通过配置的通知渠道推送提醒。语义说明：
 一条新记录意味着该领馆刚放出一批号（已有用户抢到一个），放号通常是成批的，
 看到推送后应立即去官方 CGI 系统查看并预约。
 
@@ -19,17 +19,22 @@ browser real-time loop; `--check` = on-demand status push.
 
 import argparse
 import datetime as dt
+import errno
+import http.client
 import json
 import os
 import queue
 import random
 import re
 import signal
+import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -78,12 +83,20 @@ NTFY_SERVER = _env("NTFY_SERVER", "https://ntfy.sh")
 # hold an access token from a (free) ntfy account for this to work.
 EMAIL_TO = _env("EMAIL")
 NTFY_TOKEN = _env("NTFY_TOKEN")
+NOTIFY_CHANNELS = tuple(dict.fromkeys(
+    channel.strip().lower() for channel in _env("NOTIFY_CHANNELS", "ntfy").split(",")
+    if channel.strip()
+)) or ("ntfy",)
+BARK_KEY = os.environ.get("VISA_BARK_KEY", "").strip()
+BARK_SERVER = _env("BARK_SERVER", "https://api.day.app").strip().rstrip("/")
+BARK_LEVEL = _env("BARK_LEVEL", "timeSensitive").strip()
 STATE_FILE = Path(_env("STATE") or Path(__file__).with_name("state.json"))
 # Append-only audit trail of every check (see check_and_notify).
 HISTORY_FILE = Path(_env("HISTORY") or Path(__file__).with_name("history.jsonl"))
 _today = _env("TODAY")
 TODAY = dt.date.fromisoformat(_today) if _today else dt.date.today()
 URL = "https://qmq.app"
+BOOKING_URL = "https://www.usvisascheduling.com/"
 
 # --------------------------------------------------------------------------- #
 # DOM extraction -- runs inside the rendered page. The public feed lives in a
@@ -272,13 +285,13 @@ def prune_known(state: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Push (ntfy.sh)
+# Notifications
 # --------------------------------------------------------------------------- #
 def push(title: str, body: str, click: str = URL, priority: str = "urgent",
-         email: str = "") -> None:
+         email: str = "") -> bool:
     if not NTFY_TOPIC:
         print("[warn] VISA_NTFY_TOPIC not set -- skipping push. Message was:\n", title, body)
-        return
+        return False
     headers = {
         "Title": title.encode("utf-8").decode("latin-1", "ignore"),
         "Priority": priority,
@@ -296,30 +309,159 @@ def push(title: str, body: str, click: str = URL, priority: str = "urgent",
     )
     with urllib.request.urlopen(req, timeout=20) as r:
         r.read()
+    return True
 
 
-def push_repeated(title: str, body: str, click: str = URL) -> None:
+def push_repeated(title: str, body: str, click: str = URL) -> bool:
     """Send the same alert PUSH_REPEAT times, PUSH_INTERVAL seconds apart, so an
     alert is hard to overlook. Each copy is numbered (i/N). Failures don't abort."""
     if not NTFY_TOPIC:
-        push(title, body, click)  # prints the "not set" warning once
-        return
+        return push(title, body, click)  # prints the "not set" warning once
+    sent = False
     for i in range(PUSH_REPEAT):
         suffix = f" ({i + 1}/{PUSH_REPEAT})" if PUSH_REPEAT > 1 else ""
         # Only the FIRST copy carries the e-mail header -- one e-mail per alert.
         email = EMAIL_TO if i == 0 else ""
         try:
-            push(title + suffix, body, click, email=email)
+            sent = push(title + suffix, body, click, email=email) or sent
         except Exception as e:
-            print(f"[push] copy {i + 1}/{PUSH_REPEAT} failed: {e}", flush=True)
+            print(f"[ntfy] copy {i + 1}/{PUSH_REPEAT} failed: {notification_error(e)}", flush=True)
             if email:
-                print("[push] retrying copy 1 without e-mail forwarding", flush=True)
+                print("[ntfy] retrying copy 1 without e-mail forwarding", flush=True)
                 try:
-                    push(title + suffix, body, click)
+                    sent = push(title + suffix, body, click) or sent
                 except Exception as e2:
-                    print(f"[push] retry also failed: {e2}", flush=True)
+                    print(f"[ntfy] retry also failed: {notification_error(e2)}", flush=True)
         if i < PUSH_REPEAT - 1:
             time.sleep(PUSH_INTERVAL)
+    return sent
+
+
+def notification_error(error: Exception) -> str:
+    """Keep request URLs, bodies, and raw server errors out of notification logs."""
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    return type(error).__name__
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_BARK_OPENER = urllib.request.build_opener(_NoRedirect())
+_BARK_TRANSIENT_HTTP = {408, 429, 500, 502, 503, 504}
+
+
+def push_bark(title: str, body: str) -> bool:
+    if not BARK_KEY:
+        print("[bark] VISA_BARK_KEY not set; skipping push", flush=True)
+        return False
+    if BARK_LEVEL not in {"critical", "active", "timeSensitive", "passive"}:
+        print("[bark] invalid VISA_BARK_LEVEL", flush=True)
+        return False
+    try:
+        server = urllib.parse.urlsplit(BARK_SERVER)
+        if (server.scheme not in {"https", "http"} or not server.hostname
+                or server.username is not None or server.query or server.fragment):
+            raise ValueError
+    except ValueError:
+        print("[bark] invalid VISA_BARK_SERVER; set the server base URL", flush=True)
+        return False
+
+    req = urllib.request.Request(
+        f"{BARK_SERVER}/push",
+        data=json.dumps({
+            "device_key": BARK_KEY, "title": title, "body": body,
+            "level": BARK_LEVEL, "group": "USVisa", "url": BOOKING_URL,
+        }, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        status = None
+        try:
+            with _BARK_OPENER.open(req, timeout=10) as response:
+                status = response.status
+                if 200 <= status < 300:
+                    result = json.loads(response.read())
+                    code = result.get("code") if isinstance(result, dict) else None
+                    if type(code) is int and code == 200:
+                        return True
+                    if type(code) is int and 100 <= code <= 599:
+                        print(f"[bark] API rejected push (code {code})", flush=True)
+                    else:
+                        print("[bark] invalid API response: expected a numeric code", flush=True)
+                    return False
+        except urllib.error.HTTPError as e:
+            status = e.code
+            if e.fp is not None:
+                e.close()
+        except (OSError, http.client.HTTPException) as e:
+            status = None
+            reason = e.reason if isinstance(e, urllib.error.URLError) else e
+            problem = f"network error ({type(reason).__name__})"
+            retryable = (
+                isinstance(reason, (TimeoutError, ConnectionError, http.client.IncompleteRead))
+                or (isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_AGAIN)
+                or (isinstance(reason, OSError) and reason.errno in {errno.ENETUNREACH, errno.EHOSTUNREACH})
+            )
+        except ValueError:
+            print("[bark] invalid JSON response or server URL", flush=True)
+            return False
+        # urllib normally raises HTTPError for non-2xx before returning a response.
+        if status is not None:
+            problem = f"HTTP {status}"
+            retryable = status in _BARK_TRANSIENT_HTTP
+        if not retryable or attempt == attempts:
+            print(f"[bark] push failed ({problem}, attempt {attempt}/{attempts})", flush=True)
+            return False
+        print(f"[bark] {problem}, retrying (attempt {attempt}/{attempts})", flush=True)
+        time.sleep(attempt)
+    return False
+
+
+def bark_release_message(matches: list) -> tuple[str, str]:
+    by_location = {}
+    for match in matches:
+        by_location.setdefault((match["city"], match["visa"]), set()).add(match["date"])
+    cities = {city for city, _ in by_location}
+    title = f"{next(iter(cities)) if len(cities) == 1 else ''}美签发现新号源！"
+    lines = []
+    for (city, visa), dates in by_location.items():
+        lines.extend((f"签证类型：{visa}", f"领事馆：{city}", f"可预约日期：{min(dates)}"))
+        if len(dates) > 1:
+            lines[-1] += f"（最早日期，本批共 {len(dates)} 个日期）"
+    lines.append("请尽快进入官网查看并预约。日期以官网为准。")
+    return title, "\n".join(lines)
+
+
+def notify(title: str, body: str, *, priority: str = "urgent", alert_records=()) -> bool:
+    """Try every selected channel and report whether all accepted the message."""
+    def send(channel: str) -> bool:
+        try:
+            if channel == "bark":
+                message = bark_release_message(alert_records) if alert_records else (title, body)
+                sent = push_bark(*message)
+            elif channel == "ntfy":
+                sent = (push_repeated(title, body) if alert_records
+                        else push(title, body, priority=priority))
+            else:
+                print("[notify] invalid VISA_NOTIFY_CHANNELS entry; use bark or ntfy", flush=True)
+                return False
+        except Exception as e:
+            print(f"[{channel}] push failed: {notification_error(e)}", flush=True)
+            return False
+        if sent:
+            print(f"[{channel}] push accepted", flush=True)
+        return sent
+
+    if len(NOTIFY_CHANNELS) == 1:
+        return send(NOTIFY_CHANNELS[0])
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(send, NOTIFY_CHANNELS))
+    return all(results)
 
 
 # --------------------------------------------------------------------------- #
@@ -374,8 +516,7 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
     known = state["known"]
 
     # A record is NEW if we have never alerted this city+visa+date combination.
-    # "known" is cumulative (not a snapshot): feed rows rotate out of the
-    # marquee, and a rotated-out date reappearing means a brand-new grab there.
+    # "known" is cumulative: a rotated-out date is still known if it reappears.
     new_hits = [m for m in matches
                 if m["date"] not in known.get(f"{m['city']}|{m['visa']}", [])]
 
@@ -398,11 +539,11 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
             lines.append(f"{c}: {parts}")
         n = len(new_hits)
         title = f"‼️ {VISA_PREFIX} 放号信号 · {n} 条 by {CUTOFF}"
-        push_repeated(title, "\n".join(lines))
-        print(f"[{stamp}] PUSHED x{PUSH_REPEAT} (every {PUSH_INTERVAL}s): "
-              + " | ".join(lines), flush=True)
+        print(f"[{stamp}] NEW RELEASE SIGNALS: " + " | ".join(lines), flush=True)
+        notify(title, "\n".join(lines), alert_records=new_hits)
 
-    # Merge the current qualifying set into the cumulative known map.
+    # Keep the existing seen-record policy across channels. A push failure must
+    # not cause a later check to resend the same alert to a successful channel.
     for m in matches:
         known.setdefault(f"{m['city']}|{m['visa']}", [])
         if m["date"] not in known[f"{m['city']}|{m['visa']}"]:
@@ -413,17 +554,18 @@ def check_and_notify(data: dict, verbose: bool = True) -> None:
     # frozen we cannot see new grabs at all, so recovery is itself news.
     was_stale = bool(state.get("src_stale"))
     is_stale = freshest is not None and freshest >= STALE_AFTER_MIN
-    if was_stale and not is_stale:
-        push(f"{VISA_PREFIX} source is LIVE again",
-             f"qmq feed is fresh again (freshest record {freshest:.0f}m old).\n"
-             f"Release monitoring is effective from now on.", priority="high")
-        print(f"[{stamp}] SOURCE RECOVERED (age {freshest:.0f}m) -- notified", flush=True)
+    if was_stale and not is_stale and freshest is not None:
+        notify(f"{VISA_PREFIX} source is LIVE again",
+               f"qmq feed is fresh again (freshest record {freshest:.0f}m old).\n"
+               f"Release monitoring is effective from now on.", priority="high")
+        print(f"[{stamp}] SOURCE RECOVERED (age {freshest:.0f}m)", flush=True)
     elif is_stale and not was_stale:
-        push(f"{VISA_PREFIX} source looks frozen",
-             f"No new grab records for {freshest / 60:.1f}h. Quiet stretch or "
-             f"upstream issue -- keep an eye out.", priority="default")
-        print(f"[{stamp}] SOURCE WENT STALE (age {freshest:.0f}m) -- notified", flush=True)
-    state["src_stale"] = is_stale
+        notify(f"{VISA_PREFIX} source looks frozen",
+               f"No new grab records for {freshest / 60:.1f}h. Quiet stretch or "
+               f"upstream issue -- keep an eye out.", priority="default")
+        print(f"[{stamp}] SOURCE WENT STALE (age {freshest:.0f}m)", flush=True)
+    if freshest is not None:
+        state["src_stale"] = is_stale
 
     state["last_checked"] = stamp
     save_state(state)
@@ -530,19 +672,18 @@ def run_check(page=None) -> int:
     except Exception as e:
         reason = str(e) or e.__class__.__name__
         print(f"[{stamp}] STATUS: SCRAPE_FAILED ({reason})", flush=True)
-        push(f"{VISA_PREFIX} status unavailable", f"Could not read qmq.app: {reason}",
-             priority="default")
+        notify(f"{VISA_PREFIX} status unavailable", f"Could not read qmq.app: {reason}",
+               priority="default")
         return 0
     if data.get("error"):
         print(f"[{stamp}] STATUS: EXTRACT_FAILED ({data['error']})", flush=True)
-        push(f"{VISA_PREFIX} status unavailable", f"Extract failed: {data['error']}",
-             priority="default")
+        notify(f"{VISA_PREFIX} status unavailable", f"Extract failed: {data['error']}",
+               priority="default")
         return 0
     title, body = build_status(dedup_records(data))
     print(f"[{stamp}] {title}\n" + "\n".join("    " + b for b in body.split("\n")), flush=True)
-    # single, non-urgent push: this is user-requested, not a slot alert. Does not
-    # touch dedup state, so it can never suppress a real alert.
-    push(title, body, priority="default")
+    # A single status push per channel leaves the slot alert dedup state alone.
+    notify(title, body, priority="default")
     return 0
 
 
@@ -588,7 +729,8 @@ def run_watch(interval: int, recycle: int = 40) -> int:
     # runs and Chromium is closed cleanly instead of orphaned.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     # Answer "status" / "emergency status" messages sent to our ntfy topic.
-    threading.Thread(target=listen_for_commands, daemon=True).start()
+    if "ntfy" in NOTIFY_CHANNELS:
+        threading.Thread(target=listen_for_commands, daemon=True).start()
     print(f"[watch] every ~{interval}s: {target_label()} by {CUTOFF}. Ctrl-C to stop.", flush=True)
     with sync_playwright() as p:
         browser = launch_browser(p, headless=True)
@@ -659,13 +801,15 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.test_push:
-        push("visaMonitor test",
-             f"Watching {target_label()} for release signals by {CUTOFF}.")
-        print("test push sent (if VISA_NTFY_TOPIC set)")
-        return
+        sent = notify("visaMonitor 推送测试",
+                      f"监测目标：{target_label()}，截止日期：{CUTOFF}。这是测试通知。")
+        sys.exit(0 if sent else 1)
 
     if args.check:
         sys.exit(run_check())
+
+    if "bark" in NOTIFY_CHANNELS and not BARK_KEY:
+        print("[bark] VISA_BARK_KEY not set; Bark pushes are disabled", flush=True)
 
     if args.watch is not None:
         sys.exit(run_watch(max(20, args.watch)))
